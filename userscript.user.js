@@ -109,7 +109,7 @@
         countByPosts: false,
         stopOnOriginal: true,
         excludedUsers: ['krishma', 'krishmaa098'],
-        apiKeys: ['GM_oVbizUifRmCy901JR7iiKLVXNZSbh4eLSre6iApsJln1gadycHxio9ofb8Kb9'],
+        apiKeys: ['AIzaSyAu5QhccKTj_FAgIGo9E5KIqLR6fu_GqaI', 'AIzaSyDtC9ET5zbFFgREug2g0j6sZjUpEPDA0Us'],
         disableLikeAfterAIReply: false,
         analytics: {
             daily: {},
@@ -729,6 +729,36 @@
     async function aiReplyFlow(){const article=getTopVisibleArticle();if(!article){alert('No tweet detected');return}const tweet=extractTweetText(article);if(!tweet){alert('Could not read tweet');return}const lang=detectTweetLang(article);const reply=await generateAIReply(tweet,lang);if(!reply){alert('AI failed: '+(window.__lastAiError||'please try again later'));return}const opened=openReplyForArticle(article);if(!opened){alert('Reply button not found');return}await wait(300);const box=await waitForComposer();if(!box){alert('Composer not found');return}insertTextIntoEditable(box,reply);await wait(250);clickReplySend()}
     async function replyCurrentPostWithAI(){
         try {
+            const article=getTopVisibleArticle();
+            if(!article){alert('No tweet detected');return}
+            const tweet=extractTweetText(article);
+            if(!tweet){alert('Could not read tweet');return}
+            const lang=detectTweetLang(article);
+            const opened=openReplyForArticle(article);
+            if(!opened){alert('Reply button not found');return}
+            const dlg=await waitForReplyDialog(6000);
+            if(!dlg){alert('Reply dialog not found');return}
+            const box=await (async()=>{const start=Date.now();while(Date.now()-start<6000){const b=findComposerInDialog(dlg);if(b) return b;await wait(120)}return null})();
+            if(!box){alert('Composer not found');return}
+            let reply=await generateAIReply(tweet,lang,recentReplies.slice(-20));
+            if(!reply){alert('AI failed: '+(window.__lastAiError||'please try again later'));return}
+            const ok=insertTextIntoEditable(box,reply);
+            if(!ok){alert('Could not insert reply');return}
+            try{ box.dispatchEvent(new InputEvent('input',{bubbles:true})); }catch(e){}
+            try{ box.focus(); }catch(e){}
+            let tries=0; let clicked=false;
+            while(tries<20 && !clicked){ if(clickReplySendInDialog(dlg)){ clicked=true; break;} pressKeyboardSend(box); await wait(120); tries++; }
+            const sent=clicked?await waitForSendCompletion(7000):false;
+            if(!sent){alert('Failed to send');return}
+            try{ const r=normText(reply); recentReplies.push(r); if(recentReplies.length>50) recentReplies=recentReplies.slice(-50);}catch(e){}
+            recordAction('reply');
+            try{
+                if(!config.disableLikeAfterAIReply){
+                    const likeBtn = findButtonInArticle(article,'like');
+                    if(likeBtn){ clickLikeButton(likeBtn); }
+                }
+            }catch(e){}
+            setTimeout(()=>{ try{ closeReplyDialog(); }catch(e){} }, Math.max(250, config.actionDelay));
             return true;
     } catch(e) {
         console.error('Reply error:',e);
@@ -1663,8 +1693,8 @@
                 margin-top: 4px;
             }
 
-            /* Analytics Launch Button */
-            #analytics-btn {
+            /* Action Buttons */
+            #analytics-btn, #communities-btn {
                 display: flex;
                 align-items: center;
                 justify-content: center;
@@ -1683,9 +1713,35 @@
                 white-space: normal;
                 gap: 8px;
             }
-            #analytics-btn:hover {
+            #analytics-btn:hover, #communities-btn:hover {
                 border-color: rgba(255,255,255,0.3);
                 background: linear-gradient(135deg, rgba(255,255,255,0.16), rgba(255,255,255,0.10));
+            }
+
+            #communities-start-btn:not(:disabled):hover {
+                opacity: 0.9;
+                transform: translateY(-1px);
+                box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            }
+
+            #communities-stop-btn:hover {
+                background: rgba(239, 68, 68, 0.2);
+            }
+
+            #communities-mode-switcher .autoaction-mode-btn {
+                flex: 1;
+                padding: 8px 12px;
+                border-radius: 6px;
+                background: rgba(255,255,255,0.05);
+                border: 1px solid rgba(255,255,255,0.1);
+                color: #e0e0e0;
+                cursor: pointer;
+                transition: all 0.2s;
+            }
+
+            #communities-mode-switcher .autoaction-mode-btn:hover {
+                background: rgba(255,255,255,0.1);
+                border-color: rgba(255,255,255,0.2);
             }
         `;
         const styleSheet = document.createElement("style");
@@ -1808,8 +1864,9 @@
                             <label for="disable-like-after-ai-reply">Disable Like after AI Reply</label>
                             <input type="checkbox" id="disable-like-after-ai-reply" ${config.disableLikeAfterAIReply ? 'checked' : ''}>
                         </div>
-                        <div class="autoaction-setting" style="grid-column: 1 / -1;">
-                            <button id="analytics-btn">📊 View Analytics</button>
+                        <div class="autoaction-setting" style="grid-column: 1 / -1; display: flex; gap: 8px;">
+                            <button id="analytics-btn" style="flex: 1;">📊 View Analytics</button>
+                            <button id="communities-btn" style="flex: 1;">👥 Communities</button>
                         </div>
                     </div>
                 </div>
@@ -1909,6 +1966,7 @@
         updateStatus();
         document.getElementById('generate-reply-btn').addEventListener('click', replyCurrentPostWithAI);
         document.getElementById('analytics-btn').addEventListener('click', showAnalytics);
+        document.getElementById('communities-btn').addEventListener('click', showCommunities);
     }
 
     function updateStatus() {
@@ -2005,8 +2063,418 @@
         try { console.log('[analytics] showAnalytics -> rendered simple analytics'); } catch(_) {}
     }
 
+    function isCommunitiesOrMessagesPage() {
+        const url = window.location.href;
+        return url.includes('x.com/messages/') || url.includes('/communities');
+    }
+
+    function isOnProfilePage() {
+        const url = window.location.href;
+        return url.match(/x\.com\/[^\/]+$/) && !url.includes('/messages') && !url.includes('/communities');
+    }
+
+    let isAutomationRunning = false;
+    let currentProfileIndex = 0;
+    let profiles = [];
+    let actionTimeout = null;
+    let scrollDirection = 'down';
+
+    function getVisibleProfiles() {
+        // Find all profile containers that have the data-testid="cellInnerDiv"
+        return Array.from(document.querySelectorAll('div[data-testid="cellInnerDiv"]'))
+            .filter(div => {
+                // Only include elements that are actually visible in the viewport
+                const rect = div.getBoundingClientRect();
+                const isVisible = (
+                    rect.top >= 0 &&
+                    rect.left >= 0 &&
+                    rect.bottom <= (window.innerHeight || document.documentElement.clientHeight) &&
+                    rect.right <= (window.innerWidth || document.documentElement.clientWidth) &&
+                    rect.width > 0 &&
+                    rect.height > 0
+                );
+
+                // Additional check to ensure it's a profile container
+                const hasProfileElements = div.querySelector('div[data-testid="UserAvatar-Container"]') ||
+                                        div.querySelector('a[role="link"][href^="/"]');
+
+                return isVisible && hasProfileElements;
+            });
+    }
+
+    function clickProfile(profileElement) {
+        try {
+            let profilePic = null;
+
+            // Strategy 1: Look for avatar container with profile link
+            profilePic = profileElement.querySelector('div[data-testid*="UserAvatar-Container"] a[role="link"][href^="/"]');
+
+            // Strategy 2: Look specifically in message entries for profile links
+            if (!profilePic) {
+                const messageEntry = profileElement.querySelector('[data-testid="messageEntry"]');
+                if (messageEntry) {
+                    // Look for profile links that contain avatar images
+                    const avatarLinks = messageEntry.querySelectorAll('a[role="link"][href^="/"]');
+                    for (const link of avatarLinks) {
+                        if (link.querySelector('img') || link.querySelector('div[style*="background-image"]')) {
+                            const href = link.getAttribute('href');
+                            // Make sure it's a profile link, not a tweet or other link
+                            if (href && href.match(/^\/[^\/]+$/) && !href.includes('status') && !href.includes('?')) {
+                                profilePic = link;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Strategy 3: More conservative approach - only very specific profile links
+            if (!profilePic) {
+                const allLinks = Array.from(profileElement.querySelectorAll('a[role="link"][href^="/"]'));
+                profilePic = allLinks.find(link => {
+                    const href = link.getAttribute('href');
+                    // Must be a simple profile URL like /username
+                    const isProfileUrl = href && href.match(/^\/[^\/]+$/) &&
+                                       !href.includes('status') &&
+                                       !href.includes('search') &&
+                                       !href.includes('messages') &&
+                                       !href.includes('?') &&
+                                       !href.includes('#');
+
+                    // Must contain an image or avatar
+                    const hasAvatar = link.querySelector('img') ||
+                                    link.querySelector('div[style*="background-image"]') ||
+                                    link.closest('div[data-testid*="Avatar"]');
+
+                    // Must be visible and clickable
+                    const isVisible = link.offsetWidth > 0 && link.offsetHeight > 0;
+
+                    return isProfileUrl && hasAvatar && isVisible;
+                });
+            }
+
+            if (profilePic) {
+                console.log('Found profile link:', profilePic.href);
+                profilePic.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                setTimeout(() => {
+                    profilePic.click();
+                    console.log('Clicked profile:', profilePic.href);
+                }, 1000);
+                return true;
+            } else {
+                console.log('Could not find profile picture to click in element:', profileElement);
+                return false;
+            }
+        } catch (error) {
+            console.error('Error clicking profile:', error);
+            return false;
+        }
+    }
+
+    async function likePinnedTweet() {
+        try {
+            // Wait for tweets to load
+            await new Promise(resolve => setTimeout(resolve, 2000));
+
+            // Find all tweet articles
+            const tweets = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
+            if (tweets.length === 0) {
+                console.log('No tweets found on the page');
+                return false;
+            }
+
+            // Look for pinned tweet first, then fallback to first tweet
+            let tweet = tweets.find(t => t.querySelector('[data-testid="socialContext"]')?.textContent?.includes('Pinned'));
+            if (!tweet) {
+                tweet = tweets[0];
+                console.log('No pinned tweet found, using first tweet');
+            } else {
+                console.log('Found pinned tweet');
+            }
+
+            // Scroll to the tweet
+            tweet.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            await new Promise(resolve => setTimeout(resolve, 1500));
+
+            // Find the like button - try multiple approaches
+            let likeButton = tweet.querySelector('button[data-testid="like"]');
+            if (!likeButton) {
+                likeButton = tweet.querySelector('button[aria-label*="Like"]');
+            }
+            if (!likeButton) {
+                likeButton = tweet.querySelector('div[data-testid="like"] button');
+            }
+
+            if (likeButton) {
+                console.log('Found like button:', likeButton.getAttribute('aria-label'));
+
+                // Check if already liked by looking at aria-label or SVG styling
+                const ariaLabel = likeButton.getAttribute('aria-label') || '';
+                const isLiked = ariaLabel.includes('Unlike') ||
+                               ariaLabel.includes('Liked') ||
+                               likeButton.querySelector('svg[style*="rgb(249, 24, 128)"]') ||
+                               likeButton.querySelector('svg[fill*="rgb(249, 24, 128)"]') ||
+                               getComputedStyle(likeButton.querySelector('svg') || {}).color === 'rgb(249, 24, 128)';
+
+                if (!isLiked) {
+                    console.log('Clicking like button...');
+                    likeButton.click();
+                    console.log('Successfully clicked like button');
+                    await new Promise(resolve => setTimeout(resolve, 1500));
+                    return true;
+                } else {
+                    console.log('Tweet already liked');
+                    return true;
+                }
+            } else {
+                console.log('Could not find like button in tweet');
+                return false;
+            }
+        } catch (error) {
+            console.error('Error liking tweet:', error);
+            return false;
+        }
+    }
+
+    function updateCommunitiesStatus(message) {
+        const statusEl = document.getElementById('communities-status');
+        if (statusEl) {
+            statusEl.textContent = message;
+        }
+        console.log(`[Communities] ${message}`);
+    }
+
+    function updateCommunitiesProgress(percent) {
+        const progressBar = document.getElementById('communities-progress');
+        if (progressBar) {
+            progressBar.style.width = `${Math.min(100, Math.max(0, percent))}%`;
+        }
+    }
+
+    async function processNextProfile() {
+        if (!isAutomationRunning) return;
+
+        // Only scroll if we're on the messages/communities page, not on profile pages
+        if (!isCommunitiesOrMessagesPage()) {
+            console.log('Not on communities/messages page, waiting...');
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            return processNextProfile();
+        }
+
+        const visibleProfiles = getVisibleProfiles();
+        if (visibleProfiles.length === 0) {
+            updateCommunitiesStatus('No more profiles found. Scrolling...');
+            // Only scroll if we're on the right page
+            if (isCommunitiesOrMessagesPage()) {
+                const scrollAmount = scrollDirection === 'down' ? window.innerHeight : -window.innerHeight;
+                window.scrollBy({ top: scrollAmount, behavior: 'smooth' });
+                await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+            return processNextProfile();
+        }
+
+        const profileIndex = scrollDirection === 'down' ? 0 : visibleProfiles.length - 1;
+        const profile = visibleProfiles[profileIndex];
+
+        updateCommunitiesStatus(`Processing profile ${currentProfileIndex + 1}...`);
+        updateCommunitiesProgress((currentProfileIndex + 1) / Math.max(visibleProfiles.length, currentProfileIndex + 1) * 100);
+
+        try {
+            const profileClicked = clickProfile(profile);
+            if (!profileClicked) {
+                console.log('Failed to click profile, skipping...');
+                currentProfileIndex++;
+                const actionDelay = parseInt(document.getElementById('communities-delay')?.value || '1000', 10);
+                actionTimeout = setTimeout(processNextProfile, actionDelay);
+                return;
+            }
+
+            currentProfileIndex++;
+
+            // Wait for profile page to load and check if we're actually on a profile page
+            await new Promise(resolve => setTimeout(resolve, 3000));
+
+            if (isOnProfilePage()) {
+                const liked = await likePinnedTweet();
+                updateCommunitiesStatus('Liked tweet, going back...');
+            } else {
+                console.log('Not on profile page, something went wrong');
+            }
+
+            window.history.back();
+            await new Promise(resolve => setTimeout(resolve, 3000));
+
+            const actionDelay = parseInt(document.getElementById('communities-delay')?.value || '1000', 10);
+            actionTimeout = setTimeout(processNextProfile, actionDelay);
+
+        } catch (error) {
+            console.error('Error in processNextProfile:', error);
+            window.history.back();
+
+            // Move to next profile after a delay
+            currentProfileIndex++;
+            if (currentProfileIndex < profiles.length) {
+                actionTimeout = setTimeout(processNextProfile, actionDelay);
+            } else {
+                stopAutomation();
+            }
+        }
+    }
+
+    function startAutomation() {
+        if (isAutomationRunning) return;
+
+        isAutomationRunning = true;
+        profiles = getVisibleProfiles();
+        currentProfileIndex = 0;
+
+        if (profiles.length === 0) {
+            alert('No visible profiles found!');
+            stopAutomation();
+            return;
+        }
+
+        updateAutomationStatus('Running');
+        processNextProfile();
+    }
+
+    function stopAutomation() {
+        isAutomationRunning = false;
+        if (actionTimeout) {
+            clearTimeout(actionTimeout);
+            actionTimeout = null;
+        }
+        updateAutomationStatus('Stopped');
+    }
+
+    function updateAutomationStatus(status) {
+        const statusEl = document.getElementById('communities-status');
+        const progressEl = document.getElementById('communities-progress');
+        const startBtn = document.getElementById('communities-start-btn');
+        const stopBtn = document.getElementById('communities-stop-btn');
+
+        if (status === 'Running') {
+            statusEl.textContent = 'Running';
+            statusEl.style.color = '#a0ffa0';
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+
+            // Animate progress bar
+            let progress = 0;
+            const interval = setInterval(() => {
+                if (!isAutomationRunning) {
+                    clearInterval(interval);
+                    return;
+                }
+                progress = (progress + 2) % 100;
+                progressEl.style.width = `${progress}%`;
+            }, 100);
+        } else {
+            statusEl.textContent = 'Stopped';
+            statusEl.style.color = '#ffa0a0';
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            progressEl.style.width = '0%';
+        }
+    }
+
+    function showCommunities() {
+        currentView = 'communities';
+        const panel = document.getElementById('autoaction-panel');
+        const body = document.getElementById('autoaction-panel-body');
+        if (panel) panel.classList.remove('collapsed');
+
+        const isOnValidPage = isCommunitiesOrMessagesPage();
+
+        if (body) {
+            body.style.display = 'flex';
+            body.style.maxHeight = '1000px';
+            body.style.opacity = '1';
+            body.style.padding = '14px';
+
+            body.innerHTML = `
+                <div style="width: 100%;">
+                    <h3 style="margin-top: 0; margin-bottom: 16px; color: #e0a0a0;">Communities Automation</h3>
+
+                    ${!isOnValidPage ? `
+                        <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3);
+                            padding: 12px; border-radius: 8px; margin-bottom: 16px; color: #ff9e9e;">
+                            ⚠️ You must be in a Communities or Messages page to use this feature
+                        </div>
+                    ` : ''}
+
+                    <div class="autoaction-mode-switcher" id="communities-mode-switcher" style="margin-bottom: 16px;">
+                        <button class="autoaction-mode-btn" id="communities-mode-btn-join">Join</button>
+                        <button class="autoaction-mode-btn" id="communities-mode-btn-leave">Leave</button>
+                        <button class="autoaction-mode-btn" id="communities-mode-btn-comment">Comment</button>
+                    </div>
+
+                    <div class="autoaction-settings-content" style="margin-top: 16px;">
+                        <div class="autoaction-setting">
+                            <label for="communities-delay">Action Delay (ms)</label>
+                            <input type="number" id="communities-delay" value="1000" min="500" step="100">
+                        </div>
+                        <div class="autoaction-setting">
+                            <label for="communities-max">Max Actions</label>
+                            <input type="number" id="communities-max" value="10" min="1">
+                        </div>
+                        <div class="autoaction-setting">
+                            <label for="communities-scroll-direction">Scroll Direction</label>
+                            <select id="communities-scroll-direction" style="width: 100%; padding: 6px; border-radius: 4px; background: #2f3336; color: white; border: 1px solid #4a4e51;">
+                                <option value="down">Down</option>
+                                <option value="up">Up</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div style="margin-top: 20px; display: flex; gap: 10px;">
+                        <button id="communities-start-btn"
+                                style="flex: 1; padding: 12px; border-radius: 8px; border: none;
+                                       background: ${isOnValidPage ? 'linear-gradient(135deg, rgba(34,197,94,0.85), rgba(16,185,129,0.85))' : '#555'};
+                                       color: white; font-weight: bold; cursor: ${isOnValidPage ? 'pointer' : 'not-allowed'};"
+                                ${!isOnValidPage ? 'disabled' : ''}>
+                            🚀 Start
+                        </button>
+                        <button id="communities-stop-btn"
+                                style="flex: 1; padding: 12px; border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.4);
+                                       background: rgba(239, 68, 68, 0.1); color: #ff6b6b; font-weight: bold; cursor: pointer;">
+                            ⏹️ Stop
+                        </button>
+                    </div>
+
+                    <div style="margin-top: 20px; background: rgba(255,255,255,0.05); border-radius: 8px; padding: 12px;">
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                            <span style="color: #a0a0a0;">Status:</span>
+                            <span id="communities-status" style="color: #a0ffa0;">Ready</span>
+                        </div>
+                        <div style="height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden;">
+                            <div id="communities-progress" style="height: 100%; width: 0%; background: #4CAF50; transition: width 0.3s;"></div>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            // Set default scroll direction and add event listener
+            const scrollDirectionSelect = document.getElementById('communities-scroll-direction');
+            if (scrollDirectionSelect) {
+                scrollDirectionSelect.value = scrollDirection;
+                scrollDirectionSelect.addEventListener('change', (e) => {
+                    scrollDirection = e.target.value;
+                    updateStatus(`Scroll direction set to ${scrollDirection}`);
+                });
+            }
+
+            // Add event listeners for the new buttons
+            document.getElementById('communities-start-btn')?.addEventListener('click', startAutomation);
+            document.getElementById('communities-stop-btn')?.addEventListener('click', stopAutomation);
+        }
+
+        try { console.log('[communities] showCommunities -> rendered communities panel'); } catch(_) {}
+    }
+
     // Make functions globally accessible
     window.showAnalytics = showAnalytics;
+    window.showCommunities = showCommunities;
 
     function showMainView() {
         currentView = 'main';
